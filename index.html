@@ -555,7 +555,6 @@ window.onload = function() {
     document.getElementById('p-bal').textContent=chips(session.player_balance||0);
   }
 
-  // ── Screens ──────────────────────────────────
   function showWait(){
     document.getElementById('screen-wait').style.display='flex';
     document.getElementById('screen-slot').classList.remove('active');
@@ -567,6 +566,13 @@ window.onload = function() {
     document.getElementById('screen-wait').style.display='none';
     document.getElementById('screen-slot').classList.add('active');
     updatePlayerBar();
+    // Load fresh balance from users
+    if(sess.player_id){
+      sb.from('users').select('balance').eq('id',sess.player_id).single().then(function(r){
+        if(r.data) document.getElementById('p-bal').textContent = chips(r.data.balance);
+      });
+      subscribeUserBalance(sess.player_id);
+    }
     setSpinBtn(true);
     reelData.forEach(renderReel);
     document.getElementById('lastwin-el').textContent='—';
@@ -575,25 +581,37 @@ window.onload = function() {
   }
 
   // ── Spin ─────────────────────────────────────
-  function doSpin(){
-    if(spinning||!session)return;
-    if((session.player_balance||0)<bet){
-      showWinOverlay('NICHT GENUG GUTHABEN!','');return;
+  async function doSpin(){
+    if(spinning||!session||!session.player_id)return;
+
+    // Always read fresh balance from users table — single source of truth
+    var uRes = await sb.from('users').select('balance').eq('id',session.player_id).single();
+    if(uRes.error||!uRes.data){ showWinOverlay('Fehler beim Laden des Kontos!',''); return; }
+    var currentBal = uRes.data.balance;
+
+    if(currentBal < bet){
+      showWinOverlay('NICHT GENUG GUTHABEN!','⬡ '+currentBal.toLocaleString('de-DE')); return;
     }
-    spinning=true;ac();
+
+    spinning = true;
+    ac();
     setSpinBtn(false,'DREHT…');
     document.getElementById('win-overlay').className='win-overlay';
     document.getElementById('lastwin-el').textContent='—';
     document.getElementById('lastwin-el').className='info-v';
 
-    var newBal=(session.player_balance||0)-bet;
-    session.player_balance=newBal;
-    document.getElementById('p-bal').textContent=chips(newBal);
+    var balAfterBet = currentBal - bet;
+    // Update users.balance — this triggers realtime on both tablet + phone
+    var w1 = await sb.from('users').update({balance:balAfterBet}).eq('id',session.player_id);
+    if(w1.error){ spinning=false; setSpinBtn(true); return; }
 
-    var results=[0,1,2].map(function(){return randSym();});
-    // Save to DB immediately
-    sb.from('slot_sessions').update({status:'spinning',bet:bet,symbols:results,win_amount:0,player_balance:newBal}).eq('table_code',TABLE_CODE);
-    sb.from('users').update({balance:newBal}).eq('id',session.player_id);
+    // Update display immediately
+    document.getElementById('p-bal').textContent = chips(balAfterBet);
+
+    // Mark slot_sessions as spinning (phone sees this)
+    await sb.from('slot_sessions').update({status:'spinning', bet:bet}).eq('table_code',TABLE_CODE);
+
+    var results = [0,1,2].map(function(){ return randSym(); });
 
     reelData.forEach(renderReel);
     sfxSpin();
@@ -601,92 +619,84 @@ window.onload = function() {
     var durations=[1500,2050,2600];
     reelData.forEach(function(r,i){
       setTimeout(function(){
-        spinReel(r,results[i],durations[i],i,function(){
+        spinReel(r, results[i], durations[i], i, function(){
           sfxStop(i);
-          if(i===2)finishSpin(results);
+          if(i===2) finishSpin(results, balAfterBet);
         });
-      },i*110);
+      }, i*110);
     });
   }
 
-  function finishSpin(results){
-    var ev=evalResult(results);
-    var winAmt=Math.round(bet*ev.mult);
+  async function finishSpin(results, balAfterBet){
+    var ev     = evalResult(results);
+    var winAmt = Math.round(bet * ev.mult);
     rounds++;
-    document.getElementById('rounds-el').textContent=rounds;
+    document.getElementById('rounds-el').textContent = rounds;
 
-    setTimeout(function(){
-      // finalBal = (balance after bet deduction) + payout (0 if lose)
-      var finalBal=(session.player_balance||0)+winAmt;
+    await new Promise(function(r){ setTimeout(r,300); });
 
-      // Always update UI
-      session.player_balance=finalBal;
-      document.getElementById('p-bal').textContent=chips(finalBal);
+    var finalBal = balAfterBet + winAmt;
 
-      // Always write BOTH tables so users.balance stays in sync
-      sb.from('slot_sessions').update({
-        status:'result',
-        win_amount:winAmt,
-        player_balance:finalBal,
-        symbols:results
-      }).eq('table_code',TABLE_CODE);
-      sb.from('users').update({balance:finalBal}).eq('id',session.player_id);
+    // Write final balance to users — single write, no race
+    await sb.from('users').update({balance:finalBal}).eq('id',session.player_id);
 
-      if(ev.type!=='lose'){
-        var lw=document.getElementById('lastwin-el');
-        lw.textContent='⬡ '+winAmt.toLocaleString('de-DE');
-        lw.className='info-v green';
-        flash();
-        showWinOverlay(ev.label,chips(winAmt)+' ('+ev.mult+'×)');
-        if(ev.type==='jackpot')sfxJackpot();else sfxWin();
-      } else {
-        sfxLose();
-      }
+    // Update display immediately (realtime will confirm)
+    document.getElementById('p-bal').textContent = chips(finalBal);
 
-      spinning=false;
-      setSpinBtn(true);
-    },300);
+    // Write result to slot_sessions so phone sees it
+    await sb.from('slot_sessions').update({
+      status:     'result',
+      win_amount: winAmt,
+      symbols:    results
+    }).eq('table_code',TABLE_CODE);
+
+    if(ev.type !== 'lose'){
+      var lw = document.getElementById('lastwin-el');
+      lw.textContent = '⬡ '+winAmt.toLocaleString('de-DE');
+      lw.className   = 'info-v green';
+      flash();
+      showWinOverlay(ev.label, chips(winAmt)+' ('+ev.mult+'×)');
+      if(ev.type==='jackpot') sfxJackpot(); else sfxWin();
+    } else {
+      sfxLose();
+    }
+
+    spinning = false;
+    setSpinBtn(true);
   }
 
   // ── Supabase session ─────────────────────────
   async function initSession(){
-    document.getElementById('table-code-display').textContent=TABLE_CODE;
-    // Upsert this table
+    document.getElementById('table-code-display').textContent = TABLE_CODE;
     await sb.from('slot_sessions')
-      .upsert({table_code:TABLE_CODE,status:'idle',player_id:null,player_name:null,player_balance:null,bet:bet,symbols:null,win_amount:0},{onConflict:'table_code'});
+      .upsert({table_code:TABLE_CODE, status:'idle', player_id:null,
+               player_name:null, player_balance:null, bet:bet, symbols:null, win_amount:0},
+              {onConflict:'table_code'});
     subscribeRealtime();
-    // Polling fallback
-    setInterval(function(){
-      if(!session||spinning)return;
-      sb.from('slot_sessions').select('player_balance').eq('table_code',TABLE_CODE).single().then(function(r){
-        if(r.data&&session)session.player_balance=r.data.player_balance;
-        if(session)document.getElementById('p-bal').textContent=chips(session.player_balance||0);
-      });
-    },5000);
   }
 
+  var userRtChan = null;
+
   function subscribeRealtime(){
-    if(rtChan)sb.removeChannel(rtChan);
-    rtChan=sb.channel('slot-tablet-'+TABLE_CODE)
-      .on('postgres_changes',{event:'*',schema:'public',table:'slot_sessions',filter:'table_code=eq.'+TABLE_CODE},function(p){
+    if(rtChan)    sb.removeChannel(rtChan);
+    if(userRtChan)sb.removeChannel(userRtChan);
+
+    // 1) Watch slot_sessions for player joining/leaving
+    rtChan = sb.channel('slot-tablet-sess-'+TABLE_CODE)
+      .on('postgres_changes',{event:'*',schema:'public',table:'slot_sessions',
+                              filter:'table_code=eq.'+TABLE_CODE}, function(p){
         if(!p.new)return;
-        var prev=session;
-        var d=p.new;
-        // Player just joined
+        var prev = session;
+        var d    = p.new;
         if((!prev||!prev.player_id)&&d.player_id){
-          showSlot(d);return;
+          showSlot(d);
+          // Subscribe to this player's balance changes
+          subscribeUserBalance(d.player_id);
+          return;
         }
-        // Player left
         if(prev&&prev.player_id&&!d.player_id){
-          showWait();return;
-        }
-        // ── IMPORTANT: while the tablet is spinning, it OWNS the balance.
-        // Ignore Realtime balance updates during a spin to prevent race overwrites.
-        if(spinning) return;
-        // Balance sync from outside (e.g. admin adjusted, chip exchange)
-        if(session&&d.player_balance!=null){
-          session.player_balance=d.player_balance;
-          document.getElementById('p-bal').textContent=chips(session.player_balance);
+          if(userRtChan){ sb.removeChannel(userRtChan); userRtChan=null; }
+          showWait(); return;
         }
       })
       .subscribe(function(s){
@@ -695,11 +705,26 @@ window.onload = function() {
       });
   }
 
+  function subscribeUserBalance(playerId){
+    if(userRtChan)sb.removeChannel(userRtChan);
+    userRtChan = sb.channel('slot-tablet-user-'+playerId)
+      .on('postgres_changes',{event:'UPDATE',schema:'public',table:'users',
+                              filter:'id=eq.'+playerId}, function(p){
+        // Ignore during our own spin (we set it ourselves)
+        if(spinning) return;
+        if(!p.new||p.new.balance==null)return;
+        document.getElementById('p-bal').textContent = chips(p.new.balance);
+      })
+      .subscribe();
+  }
+
   async function quitSession(){
     if(!session)return;
     if(!confirm('Sitzung beenden? Der Spieler wird getrennt.'))return;
+    if(userRtChan){ sb.removeChannel(userRtChan); userRtChan=null; }
     await sb.from('slot_sessions')
-      .update({player_id:null,player_name:null,player_balance:null,status:'idle',symbols:null,win_amount:0})
+      .update({player_id:null,player_name:null,player_balance:null,
+               status:'idle',symbols:null,win_amount:0})
       .eq('table_code',TABLE_CODE);
     showWait();
   }

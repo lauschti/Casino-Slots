@@ -317,33 +317,47 @@ window.onload = function() {
   var rtChan   = null;
   var rounds   = 0;
 
-  // ── Audio: Echter Slot-Sound ─────────────────
-  var slotAudio = null;
-  var audioReady = false;
+  // ══════════════════════════════════════════════
+  //  TIMING — hier anpassen (in Millisekunden)
+  // ══════════════════════════════════════════════
+  var REEL1_STOP = 2500;   // Reel 1 stoppt nach X ms
+  var REEL2_STOP = 3700;   // Reel 2 stoppt nach X ms
+  var REEL3_STOP = 4900;   // Reel 3 stoppt nach X ms
 
-  // Preload the sound
+  // ── Audio: sound.mp3 via Web Audio API ──────
+  // Web Audio decodeAudioData = zuverlässiges Replay jedes Mal
+  var slotAudioBuffer = null;
+  var audioCtx = null;
+
+  function getAudioCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+
   function preloadAudio() {
-    slotAudio = new Audio('sound.mp3');
-    slotAudio.preload = 'auto';
-    slotAudio.volume  = 1.0;
-    slotAudio.addEventListener('canplaythrough', function(){ audioReady = true; });
-    slotAudio.load();
+    var ctx = getAudioCtx();
+    fetch('sound.mp3')
+      .then(function(r){ return r.arrayBuffer(); })
+      .then(function(buf){ return ctx.decodeAudioData(buf); })
+      .then(function(decoded){ slotAudioBuffer = decoded; })
+      .catch(function(e){ console.warn('sound.mp3 nicht geladen:', e); });
   }
 
   function sfxSpin() {
-    if (!slotAudio) return;
-    slotAudio.currentTime = 0;
-    slotAudio.play().catch(function(){});
+    if (!slotAudioBuffer) return;
+    var ctx = getAudioCtx();
+    var src = ctx.createBufferSource();
+    src.buffer = slotAudioBuffer;
+    src.connect(ctx.destination);
+    src.start(0);
   }
 
-  function sfxStop(reelIdx) {
-    // Sound already contains stop sounds — nothing extra needed
-  }
+  function sfxStop(reelIdx) { /* Sound läuft durch — kein extra Stop-Geräusch nötig */ }
 
   function sfxWin() {
-    // Short win tone via Web Audio (sound.mp3 covers the spin itself)
     try {
-      var c = new(window.AudioContext||window.webkitAudioContext)();
+      var c = getAudioCtx();
       [523,659,784,1047].forEach(function(n,i){
         var o=c.createOscillator(),g=c.createGain();
         o.type='sine';o.frequency.value=n;
@@ -357,7 +371,7 @@ window.onload = function() {
 
   function sfxJackpot() {
     try {
-      var c = new(window.AudioContext||window.webkitAudioContext)();
+      var c = getAudioCtx();
       var mel=[523,659,784,1047,784,1047,1319,1047,1319,1568];
       var durs=[.15,.1,.1,.2,.1,.1,.15,.1,.1,.45];
       var t=0;
@@ -375,8 +389,8 @@ window.onload = function() {
 
   function sfxLose() {
     try {
-      var c = new(window.AudioContext||window.webkitAudioContext)();
-      [[280,.07],[210,.08],[150,.16]].forEach(function(p,i){
+      var c = getAudioCtx();
+      [[280,.0],[210,.08],[150,.16]].forEach(function(p){
         var o=c.createOscillator(),g=c.createGain();
         o.type='sawtooth';o.frequency.value=p[0];
         g.gain.setValueAtTime(0.1,c.currentTime+p[1]);
@@ -387,7 +401,7 @@ window.onload = function() {
     } catch(e){}
   }
 
-  function startTicking() { /* sound.mp3 handles all reel ticking */ }
+  function startTicking() { /* sound.mp3 enthält die Reel-Geräusche */ }
 
   // ── Reels ────────────────────────────────────
   function randSym(){var t=WEIGHTS.reduce(function(a,b){return a+b;},0),r=Math.random()*t,c=0;for(var i=0;i<SYMS.length;i++){c+=WEIGHTS[i];if(r<=c)return SYMS[i];}return SYMS[SYMS.length-1];}
@@ -532,10 +546,9 @@ window.onload = function() {
     reelData.forEach(renderReel);
     sfxSpin();
 
-    // Reel 1 stops at 2500ms (matches sound), 2 at 3700ms, 3 at 4900ms
-    var REEL_STOP = [2500, 3700, 4900];
+    var REEL_STOPS = [REEL1_STOP, REEL2_STOP, REEL3_STOP];
     reelData.forEach(function(r, i){
-      spinReel(r, results[i], REEL_STOP[i], i, function(){
+      spinReel(r, results[i], REEL_STOPS[i], i, function(){
         sfxStop(i);
         if(i===2) finishSpin(results, balAfterBet);
       });
@@ -668,10 +681,14 @@ window.onload = function() {
     this.textContent = ptOpen ? '▲ Gewinntabelle ausblenden' : '▼ Gewinntabelle';
   });
 
-  if('wakeLock' in navigator) navigator.wakeLock.request('screen').catch(function(){});
+  // Unlock AudioContext + preload sound on first user gesture
+  document.body.addEventListener('click', function unlock() {
+    getAudioCtx();
+    preloadAudio();
+    document.body.removeEventListener('click', unlock);
+  }, { once: true });
 
-  // Preload sound
-  preloadAudio();
+  if('wakeLock' in navigator) navigator.wakeLock.request('screen').catch(function(){});
 
   // ── Boot ─────────────────────────────────────
   initSession();

@@ -317,159 +317,77 @@ window.onload = function() {
   var rtChan   = null;
   var rounds   = 0;
 
-  // ── Audio: Realistic slot sounds via Web Audio ───
-  var actx = null;
-  function ac(){
-    if(!actx) actx = new(window.AudioContext||window.webkitAudioContext)();
-    if(actx.state==='suspended') actx.resume();
-    return actx;
+  // ── Audio: Echter Slot-Sound ─────────────────
+  var slotAudio = null;
+  var audioReady = false;
+
+  // Preload the sound
+  function preloadAudio() {
+    slotAudio = new Audio('sound.mp3');
+    slotAudio.preload = 'auto';
+    slotAudio.volume  = 1.0;
+    slotAudio.addEventListener('canplaythrough', function(){ audioReady = true; });
+    slotAudio.load();
   }
 
-  // White/pink noise burst — used for mechanical "clunk" sounds
-  function noise(dur, vol, freq, q, dl) {
-    try {
-      var c = ac(), len = Math.floor(c.sampleRate * dur);
-      var buf = c.createBuffer(1, len, c.sampleRate);
-      var d   = buf.getChannelData(0);
-      for(var i=0;i<len;i++) d[i] = (Math.random()*2-1) * Math.pow(1 - i/len, 1.5);
-      var src  = c.createBufferSource();
-      var filt = c.createBiquadFilter();
-      var gain = c.createGain();
-      src.buffer = buf;
-      filt.type = 'bandpass'; filt.frequency.value = freq||800; filt.Q.value = q||1.5;
-      gain.gain.setValueAtTime(0, c.currentTime+(dl||0));
-      gain.gain.linearRampToValueAtTime(vol||0.3, c.currentTime+(dl||0)+0.002);
-      gain.gain.exponentialRampToValueAtTime(0.001, c.currentTime+(dl||0)+dur);
-      src.connect(filt); filt.connect(gain); gain.connect(c.destination);
-      src.start(c.currentTime+(dl||0));
-    } catch(e){}
-  }
-
-  // Mechanical click — like a reel tooth clicking past a detent
-  function click(vol, dl) {
-    try {
-      var c = ac();
-      var buf = c.createBuffer(1, Math.floor(c.sampleRate*0.015), c.sampleRate);
-      var d   = buf.getChannelData(0);
-      for(var i=0;i<d.length;i++) d[i] = (Math.random()*2-1) * Math.exp(-i/(d.length*0.3));
-      var src  = c.createBufferSource();
-      var filt = c.createBiquadFilter();
-      var gain = c.createGain();
-      src.buffer = buf;
-      filt.type='highpass'; filt.frequency.value=300;
-      gain.gain.setValueAtTime(vol||0.25, c.currentTime+(dl||0));
-      src.connect(filt); filt.connect(gain); gain.connect(c.destination);
-      src.start(c.currentTime+(dl||0));
-    } catch(e){}
-  }
-
-  // Tone with envelope
-  function tone(f, type, dur, vol, dl) {
-    try {
-      var c = ac(), o = c.createOscillator(), g = c.createGain();
-      o.type = type||'sine'; o.frequency.value = f;
-      g.gain.setValueAtTime(0, c.currentTime+(dl||0));
-      g.gain.linearRampToValueAtTime(vol||0.15, c.currentTime+(dl||0)+0.005);
-      g.gain.exponentialRampToValueAtTime(0.001, c.currentTime+(dl||0)+dur);
-      o.connect(g); g.connect(c.destination);
-      o.start(c.currentTime+(dl||0));
-      o.stop(c.currentTime+(dl||0)+dur+0.01);
-    } catch(e){}
-  }
-
-  // Lever pull / motor start: rising whir
   function sfxSpin() {
+    if (!slotAudio) return;
+    slotAudio.currentTime = 0;
+    slotAudio.play().catch(function(){});
+  }
+
+  function sfxStop(reelIdx) {
+    // Sound already contains stop sounds — nothing extra needed
+  }
+
+  function sfxWin() {
+    // Short win tone via Web Audio (sound.mp3 covers the spin itself)
     try {
-      var c = ac();
-      // Motor hum — oscillator sweeping up
-      var o = c.createOscillator(), g = c.createGain();
-      o.type = 'sawtooth';
-      o.frequency.setValueAtTime(40, c.currentTime);
-      o.frequency.linearRampToValueAtTime(90, c.currentTime+0.25);
-      g.gain.setValueAtTime(0.12, c.currentTime);
-      g.gain.linearRampToValueAtTime(0.06, c.currentTime+0.25);
-      g.gain.exponentialRampToValueAtTime(0.001, c.currentTime+0.35);
-      o.connect(g); g.connect(c.destination);
-      o.start(c.currentTime); o.stop(c.currentTime+0.36);
-      // Metal clank of lever
-      noise(0.08, 0.35, 200, 2, 0.02);
+      var c = new(window.AudioContext||window.webkitAudioContext)();
+      [523,659,784,1047].forEach(function(n,i){
+        var o=c.createOscillator(),g=c.createGain();
+        o.type='sine';o.frequency.value=n;
+        g.gain.setValueAtTime(0.18,c.currentTime+i*.1);
+        g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+i*.1+.22);
+        o.connect(g);g.connect(c.destination);
+        o.start(c.currentTime+i*.1);o.stop(c.currentTime+i*.1+.23);
+      });
     } catch(e){}
   }
 
-  // Tick during spin — rapid mechanical clicks accelerating then slowing
-  var tickTimer = null;
-  function startTicking(reelIdx, duration) {
-    var start = Date.now();
-    var minInterval = 45;   // fastest tick (ms)
-    var maxInterval = 200;  // slowest tick (ms)
-
-    function scheduleTick() {
-      var elapsed  = Date.now() - start;
-      var progress = elapsed / duration; // 0→1
-      // Fast in middle, slow at start and end (ease in+out curve)
-      var speed    = Math.sin(progress * Math.PI);
-      var interval = maxInterval - speed * (maxInterval - minInterval);
-      // Pitch rises slightly mid-spin
-      var freq     = 600 + speed * 400 + reelIdx * 80;
-      click(0.15 + speed * 0.1);
-      // small low thud every 3rd tick
-      if (Math.random() < 0.3) noise(0.02, 0.08, freq * 0.5, 3);
-
-      if (elapsed < duration - 80) {
-        setTimeout(scheduleTick, interval);
-      }
-    }
-    scheduleTick();
-  }
-
-  // Heavy mechanical THUNK when reel stops
-  function sfxStop(reelIdx) {
-    // Low thud — like a reel brake engaging
-    noise(0.12, 0.5, 120 - reelIdx*20, 1.5);
-    noise(0.06, 0.3, 300, 2, 0.02);
-    // Small spring bounce
-    tone(180 + reelIdx*30, 'sine', 0.08, 0.06, 0.05);
-    tone(140 + reelIdx*20, 'sine', 0.06, 0.04, 0.09);
-  }
-
-  // Coin payout sounds — rapid metallic plinks
-  function sfxWin() {
-    var coinFreqs = [1800,2100,1600,2400,1900,2200,1700,2000];
-    coinFreqs.forEach(function(f, i) {
-      tone(f, 'sine', 0.06, 0.18, i * 0.065);
-      noise(0.03, 0.12, 3000, 4, i * 0.065);
-    });
-    // Rising chime
-    [523,659,784,1047].forEach(function(n,i){ tone(n,'sine',0.22,0.15,0.52+i*0.1); });
-  }
-
-  // Jackpot — coin cascade + fanfare
   function sfxJackpot() {
-    // Coin cascade (rapid fire)
-    for(var i=0;i<18;i++){
-      (function(ii){
-        var f = 1600 + Math.random()*900;
-        tone(f, 'sine', 0.05, 0.16, ii*0.04);
-        noise(0.03, 0.1, 2800+Math.random()*400, 5, ii*0.04);
-      })(i);
-    }
-    // Fanfare
-    var mel = [523,659,784,1047,784,1047,1319,1047,1319,1568];
-    var durs= [.15,.1,.1,.2,.1,.1,.15,.1,.1,.45];
-    var t = 0.75;
-    mel.forEach(function(f,i){
-      tone(f,'sine',durs[i],0.2,t);
-      tone(f/2,'triangle',durs[i],0.08,t);
-      t += durs[i]*0.85;
-    });
+    try {
+      var c = new(window.AudioContext||window.webkitAudioContext)();
+      var mel=[523,659,784,1047,784,1047,1319,1047,1319,1568];
+      var durs=[.15,.1,.1,.2,.1,.1,.15,.1,.1,.45];
+      var t=0;
+      mel.forEach(function(f,i){
+        var o=c.createOscillator(),g=c.createGain();
+        o.type='sine';o.frequency.value=f;
+        g.gain.setValueAtTime(0.22,c.currentTime+t);
+        g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+t+durs[i]);
+        o.connect(g);g.connect(c.destination);
+        o.start(c.currentTime+t);o.stop(c.currentTime+t+durs[i]+.01);
+        t+=durs[i]*.85;
+      });
+    } catch(e){}
   }
 
-  // Lose — descending blip
   function sfxLose() {
-    tone(280,'sawtooth',0.07,0.1,0);
-    tone(210,'sawtooth',0.1,0.1,0.08);
-    tone(150,'sawtooth',0.12,0.08,0.18);
+    try {
+      var c = new(window.AudioContext||window.webkitAudioContext)();
+      [[280,.07],[210,.08],[150,.16]].forEach(function(p,i){
+        var o=c.createOscillator(),g=c.createGain();
+        o.type='sawtooth';o.frequency.value=p[0];
+        g.gain.setValueAtTime(0.1,c.currentTime+p[1]);
+        g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+p[1]+.1);
+        o.connect(g);g.connect(c.destination);
+        o.start(c.currentTime+p[1]);o.stop(c.currentTime+p[1]+.11);
+      });
+    } catch(e){}
   }
+
+  function startTicking() { /* sound.mp3 handles all reel ticking */ }
 
   // ── Reels ────────────────────────────────────
   function randSym(){var t=WEIGHTS.reduce(function(a,b){return a+b;},0),r=Math.random()*t,c=0;for(var i=0;i<SYMS.length;i++){c+=WEIGHTS[i];if(r<=c)return SYMS[i];}return SYMS[SYMS.length-1];}
@@ -508,7 +426,6 @@ window.onload = function() {
       r.el.style.transition='transform '+(duration/1000).toFixed(2)+'s cubic-bezier(.22,.1,.08,1)';
       r.el.style.transform='translateY(-'+dist+'px)';
     });});
-    startTicking(reelIdx, duration);
     setTimeout(function(){r.offset=((targetOff)%len+len)%len;if(cb)cb();},duration+60);
   }
   function evalResult(res){
@@ -594,7 +511,6 @@ window.onload = function() {
     }
 
     spinning = true;
-    ac();
     setSpinBtn(false,'DREHT…');
     document.getElementById('win-overlay').className='win-overlay';
     document.getElementById('lastwin-el').textContent='—';
@@ -616,14 +532,13 @@ window.onload = function() {
     reelData.forEach(renderReel);
     sfxSpin();
 
-    var durations=[1500,2050,2600];
-    reelData.forEach(function(r,i){
-      setTimeout(function(){
-        spinReel(r, results[i], durations[i], i, function(){
-          sfxStop(i);
-          if(i===2) finishSpin(results, balAfterBet);
-        });
-      }, i*110);
+    // Reel 1 stops at 2500ms (matches sound), 2 at 3700ms, 3 at 4900ms
+    var REEL_STOP = [2500, 3700, 4900];
+    reelData.forEach(function(r, i){
+      spinReel(r, results[i], REEL_STOP[i], i, function(){
+        sfxStop(i);
+        if(i===2) finishSpin(results, balAfterBet);
+      });
     });
   }
 
@@ -736,13 +651,13 @@ window.onload = function() {
   });
 
   // ── Wiring ───────────────────────────────────
-  document.getElementById('spin-btn').addEventListener('click',function(){ac();doSpin();});
-  document.getElementById('quit-btn').addEventListener('click',quitSession);
+  document.getElementById('spin-btn').addEventListener('click', doSpin);
+  document.getElementById('quit-btn').addEventListener('click', quitSession);
   document.querySelectorAll('.bet-btn').forEach(function(b){
-    b.addEventListener('click',function(){if(!spinning)setBet(parseInt(b.dataset.bet));});
+    b.addEventListener('click', function(){ if(!spinning) setBet(parseInt(b.dataset.bet)); });
   });
-  document.addEventListener('keydown',function(e){
-    if((e.code==='Space'||e.code==='Enter')&&!spinning&&session){e.preventDefault();ac();doSpin();}
+  document.addEventListener('keydown', function(e){
+    if((e.code==='Space'||e.code==='Enter') && !spinning && session){ e.preventDefault(); doSpin(); }
   });
 
   // Payout toggle
@@ -753,7 +668,10 @@ window.onload = function() {
     this.textContent = ptOpen ? '▲ Gewinntabelle ausblenden' : '▼ Gewinntabelle';
   });
 
-  if('wakeLock' in navigator)navigator.wakeLock.request('screen').catch(function(){});
+  if('wakeLock' in navigator) navigator.wakeLock.request('screen').catch(function(){});
+
+  // Preload sound
+  preloadAudio();
 
   // ── Boot ─────────────────────────────────────
   initSession();

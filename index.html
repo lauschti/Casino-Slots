@@ -616,22 +616,33 @@ window.onload = function() {
     document.getElementById('rounds-el').textContent=rounds;
 
     setTimeout(function(){
+      // finalBal = (balance after bet deduction) + payout (0 if lose)
       var finalBal=(session.player_balance||0)+winAmt;
+
+      // Always update UI
+      session.player_balance=finalBal;
+      document.getElementById('p-bal').textContent=chips(finalBal);
+
+      // Always write BOTH tables so users.balance stays in sync
+      sb.from('slot_sessions').update({
+        status:'result',
+        win_amount:winAmt,
+        player_balance:finalBal,
+        symbols:results
+      }).eq('table_code',TABLE_CODE);
+      sb.from('users').update({balance:finalBal}).eq('id',session.player_id);
+
       if(ev.type!=='lose'){
-        session.player_balance=finalBal;
-        document.getElementById('p-bal').textContent=chips(finalBal);
         var lw=document.getElementById('lastwin-el');
         lw.textContent='⬡ '+winAmt.toLocaleString('de-DE');
         lw.className='info-v green';
         flash();
         showWinOverlay(ev.label,chips(winAmt)+' ('+ev.mult+'×)');
         if(ev.type==='jackpot')sfxJackpot();else sfxWin();
-        sb.from('slot_sessions').update({status:'result',win_amount:winAmt,player_balance:finalBal,symbols:results}).eq('table_code',TABLE_CODE);
-        sb.from('users').update({balance:finalBal}).eq('id',session.player_id);
       } else {
         sfxLose();
-        sb.from('slot_sessions').update({status:'result',win_amount:0,player_balance:session.player_balance,symbols:results}).eq('table_code',TABLE_CODE);
       }
+
       spinning=false;
       setSpinBtn(true);
     },300);
@@ -660,18 +671,21 @@ window.onload = function() {
       .on('postgres_changes',{event:'*',schema:'public',table:'slot_sessions',filter:'table_code=eq.'+TABLE_CODE},function(p){
         if(!p.new)return;
         var prev=session;
-        var newData=p.new;
+        var d=p.new;
         // Player just joined
-        if((!prev||!prev.player_id)&&newData.player_id){
-          showSlot(newData);return;
+        if((!prev||!prev.player_id)&&d.player_id){
+          showSlot(d);return;
         }
         // Player left
-        if(prev&&prev.player_id&&!newData.player_id){
+        if(prev&&prev.player_id&&!d.player_id){
           showWait();return;
         }
-        // Balance update from outside
-        if(session&&newData.player_balance!=null){
-          session.player_balance=newData.player_balance;
+        // ── IMPORTANT: while the tablet is spinning, it OWNS the balance.
+        // Ignore Realtime balance updates during a spin to prevent race overwrites.
+        if(spinning) return;
+        // Balance sync from outside (e.g. admin adjusted, chip exchange)
+        if(session&&d.player_balance!=null){
+          session.player_balance=d.player_balance;
           document.getElementById('p-bal').textContent=chips(session.player_balance);
         }
       })

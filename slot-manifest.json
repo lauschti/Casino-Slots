@@ -1,0 +1,18 @@
+{
+  "name": "Einarmiger Bandit",
+  "short_name": "Bandit",
+  "description": "Casino Night Slot Machine",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0d0a06",
+  "theme_color": "#0d0a06",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "slot-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
